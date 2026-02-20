@@ -1,67 +1,132 @@
-name: Create OCI VM
+name: OCI ARM VM - Auto Retry
 
 on:
-  schedule:
-    - cron: '*/10 * * * *'
   workflow_dispatch:
+    inputs:
+      max_attempts:
+        description: 'Número máximo de intentos (0 = infinito)'
+        required: false
+        default: '0'
+      wait_seconds:
+        description: 'Segundos entre intentos'
+        required: false
+        default: '60'
+  schedule:
+    # Ejecuta cada hora automáticamente
+    - cron: '0 * * * *'
 
 jobs:
   create-vm:
     runs-on: ubuntu-latest
-    steps:
-      - name: Install OCI CLI
-        run: |
-          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh > install.sh
-          chmod +x install.sh
-          ./install.sh --accept-all-defaults
-          echo "$HOME/bin" >> $GITHUB_PATH
+    timeout-minutes: 350  # Límite de GitHub Actions: 6h por job
 
-      - name: Configure OCI CLI
+    steps:
+      - name: Setup OCI CLI
+        run: |
+          pip install oci-cli --quiet
+
+      - name: Configure OCI credentials
         run: |
           mkdir -p ~/.oci
-          echo "[DEFAULT]" > ~/.oci/config
-          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
-          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
-          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
-          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
-          echo "key_file=~/.oci/private_key.pem" >> ~/.oci/config
+          
+          # Escribir la llave privada
           echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem
+          
+          # Crear config de OCI
+          cat > ~/.oci/config << EOF
+          [DEFAULT]
+          user=${{ secrets.OCI_USER_OCID }}
+          fingerprint=${{ secrets.OCI_FINGERPRINT }}
+          tenancy=${{ secrets.OCI_TENANCY_OCID }}
+          region=${{ secrets.OCI_REGION }}
+          key_file=~/.oci/private_key.pem
+          EOF
+          
+          chmod 600 ~/.oci/config
 
-      - name: Intentar crear VM
-        env:
-          SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
-          SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+      - name: Verify OCI connection
         run: |
-          cat > /tmp/vnic.json << EOF
-          {"assignPublicIp": true, "subnetId": "$SUBNET_ID"}
-          EOF
+          oci iam region list --output table
 
-          cat > /tmp/metadata.json << EOF
-          {"ssh_authorized_keys": "$SSH_KEY"}
-          EOF
-
-          RESULT=$(oci compute instance launch \
-            --availability-domain "XICm:SA-SANTIAGO-1-AD-1" \
-            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
-            --shape "VM.Standard.A1.Flex" \
-            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
-            --image-id "${{ secrets.OCI_IMAGE_ID }}" \
-            --create-vnic-details file:///tmp/vnic.json \
-            --metadata file:///tmp/metadata.json \
-            --display-name "mi-vm-arm" \
-            2>&1)
-
-          echo "$RESULT"
-
-          if echo "$RESULT" | grep -q "Out of host capacity"; then
-            echo "❌ Sin capacidad disponible, se reintentará en 10 minutos..."
-            exit 0
-          elif echo "$RESULT" | grep -q "PROVISIONING\|\"id\""; then
-            echo "✅ ¡VM creada exitosamente!"
-            exit 0
-          else
-            echo "⚠️ Error inesperado"
-            echo "$RESULT"
-            exit 1
-          fi
+      - name: Try to create ARM VM (with retries)
+        env:
+          IMAGE_ID: ${{ secrets.OCI_IMAGE_ID }}
+          SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
+          SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '0' }}
+          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '60' }}
+        run: |
+          attempt=0
+          
+          # Obtener el Availability Domain
+          AD=$(oci iam availability-domain list \
+            --compartment-id ${{ secrets.OCI_TENANCY_OCID }} \
+            --query 'data[0].name' \
+            --raw-output)
+          
+          echo "Availability Domain: $AD"
+          echo "Imagen: $IMAGE_ID"
+          echo "Subnet: $SUBNET_ID"
+          echo ""
+          
+          while true; do
+            attempt=$((attempt + 1))
+            echo "=========================================="
+            echo "🔄 Intento #$attempt - $(date '+%Y-%m-%d %H:%M:%S')"
+            echo "=========================================="
+            
+            # Intentar crear la instancia
+            RESULT=$(oci compute instance launch \
+              --availability-domain "$AD" \
+              --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+              --shape "VM.Standard.A1.Flex" \
+              --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
+              --image-id "$IMAGE_ID" \
+              --subnet-id "$SUBNET_ID" \
+              --assign-public-ip true \
+              --display-name "arm-free-tier" \
+              --ssh-authorized-keys-file <(echo "$SSH_KEY") \
+              --metadata '{"user_data": ""}' \
+              2>&1) && SUCCESS=true || SUCCESS=false
+            
+            if [ "$SUCCESS" = "true" ]; then
+              echo ""
+              echo "✅ ¡VM CREADA EXITOSAMENTE!"
+              echo "$RESULT" | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          inst = data['data']
+          print(f\"  ID:     {inst['id']}\")
+          print(f\"  Name:   {inst['display-name']}\")
+          print(f\"  State:  {inst['lifecycle-state']}\")
+          print(f\"  Shape:  {inst['shape']}\")
+          print(f\"  OCPUs:  {inst['shape-config']['ocpus']}\")
+          print(f\"  RAM:    {inst['shape-config']['memory-in-gbs']} GB\")
+          "
+              echo ""
+              echo "🎉 La VM ARM gratuita fue creada. Workflow finalizado."
+              exit 0
+            else
+              echo ""
+              # Detectar si el error es por falta de capacidad (esperable)
+              if echo "$RESULT" | grep -qi "Out of host capacity\|capacity\|InternalError\|NotAuthorizedOrNotFound"; then
+                echo "⏳ Sin capacidad disponible (normal). Esperando $WAIT_SECONDS segundos..."
+              else
+                echo "⚠️  Error inesperado:"
+                echo "$RESULT"
+                echo "Esperando $WAIT_SECONDS segundos antes de reintentar..."
+              fi
+              
+              # Verificar si alcanzamos el máximo de intentos
+              if [ "$MAX_ATTEMPTS" -gt "0" ] && [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
+                echo ""
+                echo "❌ Se alcanzó el máximo de $MAX_ATTEMPTS intentos sin éxito."
+                echo "Vuelve a ejecutar el workflow manualmente o espera el próximo cron."
+                exit 1
+              fi
+              
+              # Esperar antes del siguiente intento
+              sleep $WAIT_SECONDS
+            fi
+          done
