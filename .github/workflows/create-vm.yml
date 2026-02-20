@@ -1,0 +1,57 @@
+name: Create OCI VM
+
+on:
+  schedule:
+    - cron: '*/10 * * * *'  # Intenta cada 10 minutos
+  workflow_dispatch:          # También permite ejecutarlo manualmente
+
+jobs:
+  create-vm:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install OCI CLI
+        run: |
+          curl -L https://raw.githubusercontent.com/oracle/oci-cli/master/scripts/install/install.sh > install.sh
+          chmod +x install.sh
+          ./install.sh --accept-all-defaults
+          echo "$HOME/bin" >> $GITHUB_PATH
+
+      - name: Configure OCI CLI
+        run: |
+          mkdir -p ~/.oci
+          echo "[DEFAULT]" > ~/.oci/config
+          echo "user=${{ secrets.OCI_USER_OCID }}" >> ~/.oci/config
+          echo "fingerprint=${{ secrets.OCI_FINGERPRINT }}" >> ~/.oci/config
+          echo "tenancy=${{ secrets.OCI_TENANCY_OCID }}" >> ~/.oci/config
+          echo "region=${{ secrets.OCI_REGION }}" >> ~/.oci/config
+          echo "key_file=~/.oci/private_key.pem" >> ~/.oci/config
+          echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
+          chmod 600 ~/.oci/private_key.pem
+
+      - name: Intentar crear VM
+        run: |
+          RESULT=$(oci compute instance launch \
+            --availability-domain "XICm:SA-SANTIAGO-1-AD-1" \
+            --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
+            --shape "VM.Standard.A1.Flex" \
+            --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
+            --image-id "ocid1.image.oc1.sa-santiago-1.aaaaaaaapjsb2o7c6xsuglkv3pw3iul4udj7lnqb2gw4re6hdngmsf5sgw6a" \
+            --subnet-id "ocid1.subnet.oc1.sa-santiago-1.aaaaaaaai4k4pdsb6dudlmro2dscbq52rdyz7zq4vcol6kixslswwtuh66ca" \
+            --assign-public-ip true \
+            --metadata '{"ssh_authorized_keys": "ssh-rsa AAAAB3NzaC1yc2EAAAADAQABAAABAQDfQyi2QHQDl3ztIZOqsdhlDUSJSyDL8KROVb7omAQcnqrG5j6dCMukC4hYhH8DaI87sDF9ml0jQ+rFJgx/pEI7T3eRAK47Ah9EL5dR+Qxjls15PdYqpY7KDLigAgPL+QRHc+YuWdPCaqhxaD1fFASEjGAv5ZkFHwBRiy+DA2cNi4wdEH1bjelObnp2mQKIzjgSJ5MgJ/5y2W220vuutwBL3xt06AnbYNY/RwJAfhEgXttIGgSTqt1Sf4mF1CmugYiTjBAvWdDn+zlqieglXwulGJhgzCIF8H7bZnQzTbidFKVGL3oi4rG/GigXrfHv7UuAiWXGAb/hfW/+so4XT6pz ssh-key-2026-02-20"}' \
+            --display-name "mi-vm-arm" \
+            2>&1)
+
+          echo "$RESULT"
+
+          if echo "$RESULT" | grep -q "Out of host capacity"; then
+            echo "❌ Sin capacidad disponible, se reintentará en 10 minutos..."
+            exit 0
+          elif echo "$RESULT" | grep -q "PROVISIONING\|id"; then
+            echo "✅ ¡VM creada exitosamente!"
+            exit 0
+          else
+            echo "⚠️ Error inesperado"
+            echo "$RESULT"
+            exit 1
+          fi
