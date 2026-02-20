@@ -10,7 +10,7 @@ on:
       wait_seconds:
         description: 'Segundos entre intentos'
         required: false
-        default: '15'
+        default: '30'
   schedule:
     - cron: '0 * * * *'
 
@@ -83,7 +83,7 @@ jobs:
           SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
           MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '0' }}
-          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '15' }}
+          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '30' }}
         run: |
           attempt=0
 
