@@ -10,7 +10,7 @@ on:
       wait_seconds:
         description: 'Segundos entre intentos'
         required: false
-        default: '30'
+        default: '15'
   schedule:
     - cron: '0 * * * *'
 
@@ -43,9 +43,39 @@ jobs:
           EOF
           chmod 600 ~/.oci/config
 
-      - name: Verify OCI connection
+      - name: Verificar si la VM ya existe
         run: |
-          oci iam region list --output table
+          echo "🔍 Verificando si la VM ARM ya existe..."
+
+          EXISTING=$(oci compute instance list \
+            --compartment-id ${{ secrets.OCI_TENANCY_OCID }} \
+            --display-name "arm-free-tier" \
+            --lifecycle-state RUNNING \
+            --query 'data[0].id' \
+            --raw-output 2>/dev/null || echo "null")
+
+          if [ "$EXISTING" != "null" ] && [ -n "$EXISTING" ]; then
+            echo "✅ La VM ARM ya existe y está corriendo."
+            echo "   ID: $EXISTING"
+            echo "   No es necesario crear otra. Workflow finalizado."
+            exit 0
+          fi
+
+          EXISTING_PROV=$(oci compute instance list \
+            --compartment-id ${{ secrets.OCI_TENANCY_OCID }} \
+            --display-name "arm-free-tier" \
+            --lifecycle-state PROVISIONING \
+            --query 'data[0].id' \
+            --raw-output 2>/dev/null || echo "null")
+
+          if [ "$EXISTING_PROV" != "null" ] && [ -n "$EXISTING_PROV" ]; then
+            echo "⏳ La VM ARM ya está siendo provisionada (PROVISIONING)."
+            echo "   ID: $EXISTING_PROV"
+            echo "   Espera unos minutos a que termine. Workflow finalizado."
+            exit 0
+          fi
+
+          echo "✅ No existe VM previa. Procediendo a crear..."
 
       - name: Try to create ARM VM (with retries)
         env:
@@ -53,7 +83,7 @@ jobs:
           SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
           MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '0' }}
-          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '30' }}
+          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '15' }}
         run: |
           attempt=0
 
@@ -84,6 +114,7 @@ jobs:
               --display-name "arm-free-tier" \
               --ssh-authorized-keys-file <(echo "$SSH_KEY") \
               --metadata '{"user_data": ""}' \
+              --boot-volume-size-in-gbs 100 \
               2>&1) && SUCCESS=true || SUCCESS=false
 
             if [ "$SUCCESS" = "true" ]; then
@@ -93,22 +124,44 @@ jobs:
           import sys, json
           data = json.load(sys.stdin)
           inst = data['data']
-          print(f\"  ID:     {inst['id']}\")
-          print(f\"  Name:   {inst['display-name']}\")
-          print(f\"  State:  {inst['lifecycle-state']}\")
-          print(f\"  Shape:  {inst['shape']}\")
-          print(f\"  OCPUs:  {inst['shape-config']['ocpus']}\")
-          print(f\"  RAM:    {inst['shape-config']['memory-in-gbs']} GB\")
+          print(f\"  ID:        {inst['id']}\")
+          print(f\"  Name:      {inst['display-name']}\")
+          print(f\"  State:     {inst['lifecycle-state']}\")
+          print(f\"  Shape:     {inst['shape']}\")
+          print(f\"  OCPUs:     {inst['shape-config']['ocpus']}\")
+          print(f\"  RAM:       {inst['shape-config']['memory-in-gbs']} GB\")
+          print(f\"  Region:    {inst['region']}\")
           "
               echo "🎉 La VM ARM gratuita fue creada. Workflow finalizado."
               exit 0
             else
-              if echo "$RESULT" | grep -qi "Out of host capacity\|capacity\|InternalError\|NotAuthorizedOrNotFound"; then
-                echo "⏳ Sin capacidad disponible (normal). Esperando $WAIT_SECONDS segundos..."
+              # Clasificación detallada de errores
+              if echo "$RESULT" | grep -qi "Out of host capacity"; then
+                echo "⏳ [SIN CAPACIDAD] No hay hosts ARM disponibles en este momento."
+
+              elif echo "$RESULT" | grep -qi "LimitExceeded"; then
+                echo "🚫 [LÍMITE EXCEDIDO] Se alcanzó el límite de recursos de la cuenta."
+                echo "   Detalle: $RESULT"
+                exit 1
+
+              elif echo "$RESULT" | grep -qi "NotAuthorizedOrNotFound"; then
+                echo "🔐 [AUTH ERROR] Problema de permisos o recurso no encontrado."
+                echo "   Detalle: $RESULT"
+                echo "   Verifica que IMAGE_ID, SUBNET_ID y credenciales sean correctos."
+                exit 1
+
+              elif echo "$RESULT" | grep -qi "TooManyRequests"; then
+                echo "⚠️ [RATE LIMIT] Demasiadas solicitudes. Esperando 60 segundos..."
+                sleep 60
+                continue
+
+              elif echo "$RESULT" | grep -qi "InternalError\|500\|ServiceError"; then
+                echo "⚠️ [ERROR OCI] Error interno de Oracle. Reintentando..."
+                echo "   Detalle: $RESULT"
+
               else
-                echo "⚠️ Error inesperado:"
-                echo "$RESULT"
-                echo "Esperando $WAIT_SECONDS segundos antes de reintentar..."
+                echo "❓ [ERROR DESCONOCIDO] No se pudo clasificar el error:"
+                echo "   $RESULT"
               fi
 
               if [ "$MAX_ATTEMPTS" -gt "0" ] && [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
