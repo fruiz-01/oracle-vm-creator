@@ -29,15 +29,26 @@ jobs:
           chmod 600 ~/.oci/private_key.pem
 
       - name: Intentar crear VM
+        env:
+          SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
+          SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
         run: |
+          cat > /tmp/vnic.json << EOF
+          {"assignPublicIp": true, "subnetId": "$SUBNET_ID"}
+          EOF
+
+          cat > /tmp/metadata.json << EOF
+          {"ssh_authorized_keys": "$SSH_KEY"}
+          EOF
+
           RESULT=$(oci compute instance launch \
             --availability-domain "XICm:SA-SANTIAGO-1-AD-1" \
             --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
             --shape "VM.Standard.A1.Flex" \
             --shape-config '{"ocpus": 4, "memoryInGBs": 24}' \
             --image-id "${{ secrets.OCI_IMAGE_ID }}" \
-            --create-vnic-details "{\"assignPublicIp\": true, \"subnetId\": \"${{ secrets.OCI_SUBNET_ID }}\"}" \
-            --metadata "{\"ssh_authorized_keys\": \"${{ secrets.OCI_SSH_KEY }}\"}" \
+            --create-vnic-details file:///tmp/vnic.json \
+            --metadata file:///tmp/metadata.json \
             --display-name "mi-vm-arm" \
             2>&1)
 
