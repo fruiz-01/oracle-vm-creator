@@ -10,15 +10,14 @@ on:
       wait_seconds:
         description: 'Segundos entre intentos'
         required: false
-        default: '60'
+        default: '30'
   schedule:
-    # Ejecuta cada hora automáticamente
     - cron: '0 * * * *'
 
 jobs:
   create-vm:
     runs-on: ubuntu-latest
-    timeout-minutes: 350  # Límite de GitHub Actions: 6h por job
+    timeout-minutes: 350
 
     steps:
       - name: Setup OCI CLI
@@ -28,12 +27,8 @@ jobs:
       - name: Configure OCI credentials
         run: |
           mkdir -p ~/.oci
-          
-          # Escribir la llave privada
           echo "${{ secrets.OCI_PRIVATE_KEY }}" > ~/.oci/private_key.pem
           chmod 600 ~/.oci/private_key.pem
-          
-          # Crear config de OCI
           cat > ~/.oci/config << EOF
           [DEFAULT]
           user=${{ secrets.OCI_USER_OCID }}
@@ -42,7 +37,6 @@ jobs:
           region=${{ secrets.OCI_REGION }}
           key_file=~/.oci/private_key.pem
           EOF
-          
           chmod 600 ~/.oci/config
 
       - name: Verify OCI connection
@@ -55,28 +49,26 @@ jobs:
           SUBNET_ID: ${{ secrets.OCI_SUBNET_ID }}
           SSH_KEY: ${{ secrets.OCI_SSH_KEY }}
           MAX_ATTEMPTS: ${{ github.event.inputs.max_attempts || '0' }}
-          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '60' }}
+          WAIT_SECONDS: ${{ github.event.inputs.wait_seconds || '30' }}
         run: |
           attempt=0
-          
-          # Obtener el Availability Domain
+
           AD=$(oci iam availability-domain list \
             --compartment-id ${{ secrets.OCI_TENANCY_OCID }} \
             --query 'data[0].name' \
             --raw-output)
-          
+
           echo "Availability Domain: $AD"
           echo "Imagen: $IMAGE_ID"
           echo "Subnet: $SUBNET_ID"
           echo ""
-          
+
           while true; do
             attempt=$((attempt + 1))
             echo "=========================================="
             echo "🔄 Intento #$attempt - $(date '+%Y-%m-%d %H:%M:%S')"
             echo "=========================================="
-            
-            # Intentar crear la instancia
+
             RESULT=$(oci compute instance launch \
               --availability-domain "$AD" \
               --compartment-id "${{ secrets.OCI_TENANCY_OCID }}" \
@@ -89,7 +81,7 @@ jobs:
               --ssh-authorized-keys-file <(echo "$SSH_KEY") \
               --metadata '{"user_data": ""}' \
               2>&1) && SUCCESS=true || SUCCESS=false
-            
+
             if [ "$SUCCESS" = "true" ]; then
               echo ""
               echo "✅ ¡VM CREADA EXITOSAMENTE!"
@@ -104,29 +96,22 @@ jobs:
           print(f\"  OCPUs:  {inst['shape-config']['ocpus']}\")
           print(f\"  RAM:    {inst['shape-config']['memory-in-gbs']} GB\")
           "
-              echo ""
               echo "🎉 La VM ARM gratuita fue creada. Workflow finalizado."
               exit 0
             else
-              echo ""
-              # Detectar si el error es por falta de capacidad (esperable)
               if echo "$RESULT" | grep -qi "Out of host capacity\|capacity\|InternalError\|NotAuthorizedOrNotFound"; then
                 echo "⏳ Sin capacidad disponible (normal). Esperando $WAIT_SECONDS segundos..."
               else
-                echo "⚠️  Error inesperado:"
+                echo "⚠️ Error inesperado:"
                 echo "$RESULT"
                 echo "Esperando $WAIT_SECONDS segundos antes de reintentar..."
               fi
-              
-              # Verificar si alcanzamos el máximo de intentos
+
               if [ "$MAX_ATTEMPTS" -gt "0" ] && [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
-                echo ""
                 echo "❌ Se alcanzó el máximo de $MAX_ATTEMPTS intentos sin éxito."
-                echo "Vuelve a ejecutar el workflow manualmente o espera el próximo cron."
                 exit 1
               fi
-              
-              # Esperar antes del siguiente intento
+
               sleep $WAIT_SECONDS
             fi
           done
