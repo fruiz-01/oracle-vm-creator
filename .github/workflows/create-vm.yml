@@ -14,6 +14,10 @@ on:
   schedule:
     - cron: '0 * * * *'
 
+concurrency:
+  group: oci-arm-vm
+  cancel-in-progress: true
+
 jobs:
   create-vm:
     runs-on: ubuntu-latest
