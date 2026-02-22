@@ -12,11 +12,11 @@ on:
         required: false
         default: '30'
   schedule:
-    - cron: '0 * * * *'
+    - cron: '0 */6 * * *'  # Cada 6 horas en vez de cada hora
 
 concurrency:
   group: oci-arm-vm
-  cancel-in-progress: true
+  cancel-in-progress: false  # No cancelar la ejecución anterior, esperar en cola
 
 jobs:
   create-vm:
